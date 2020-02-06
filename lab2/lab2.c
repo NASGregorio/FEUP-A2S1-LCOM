@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+extern int irq_counter;
 
 
 int main(int argc, char *argv[]) {
@@ -49,6 +50,7 @@ int(timer_test_read_config)(uint8_t timer, enum timer_status_field field) {
 int(timer_test_time_base)(uint8_t timer, uint32_t freq) {
 
   if(timer_set_frequency(timer, freq)) {
+    fprintf(stderr, "Failed to set timer frequency\n");
     return 1;
   }
 
@@ -56,8 +58,56 @@ int(timer_test_time_base)(uint8_t timer, uint32_t freq) {
 }
 
 int(timer_test_int)(uint8_t time) {
-  /* To be implemented by the students */
-  printf("%s is not yet implemented!\n", __func__);
 
-  return 1;
+  
+  if(timer_set_frequency(0, 60) != 0) {
+    fprintf(stderr, "Failed to set timer frequency to 60Hz\n");
+    return 1;
+  }
+
+  uint8_t irq_set; // Number of the bit used to subscribe to interrupt
+
+  if(timer_subscribe_int(&irq_set) != 0) {
+    fprintf(stderr, "Failed to subscribe to interrupt notifications\n");
+    return 1;
+  }
+
+  int ipc_status;
+  message msg;
+  int r;
+ 
+  while( irq_counter < time*60 ) {
+
+    // Get a request message
+    if ( (r = driver_receive(ANY, &msg, &ipc_status)) != 0 ) { 
+      printf("driver_receive failed with: %d", r);
+      continue;
+    }
+
+    // Check if message is notification
+    if (is_ipc_notify(ipc_status)) {
+      switch (_ENDPOINT_P(msg.m_source)) {
+        case HARDWARE:                                      // Hardware interrupt notification
+          if (msg.m_notify.interrupts & BIT(irq_set)) {     // Check if subscribed to this interrupt
+            timer_int_handler();                            // Call interrupt handler
+            if(irq_counter % 60 == 0)                             // Every second, print elapsed time
+              timer_print_elapsed_time();
+          }
+          break;
+        default:
+          // no other notifications expected: do nothing
+          break;
+      }
+    }
+    else {
+      // No standard messages expected: do nothing
+    }
+  }
+
+  if(timer_unsubscribe_int() != 0) {
+    fprintf(stderr, "Failed to unsubsribe to interrupt notifications\n");
+    return 1;
+  }
+
+  return 0;
 }

@@ -5,6 +5,37 @@
 
 #include "i8254.h"
 
+int hook_id = 21;   // Id for interrupt notification
+
+int irq_counter=0; // Interger incremented by interrupt handler
+
+/**
+ * @brief Print interrupt request errors
+ * 
+ * @param err error code
+ * @param func_name irq function called 
+ */
+void sys_irq_print_error(int err, char* func_name) {
+  switch (err)
+  {
+  case OK:
+    break;
+  case EINVAL:
+    fprintf(stderr, "%s: Invalid request, IRQ line, hook id, or process number\n", func_name);
+    break;
+  case EPERM:
+    fprintf(stderr, "%s: Only owner of hook can toggle interrupts or release the hook\n", func_name);
+    break;
+  case ENOSPC:
+    fprintf(stderr, "%s: No free IRQ hook could be found\n", func_name);
+    break;  
+  default:
+    fprintf(stderr, "%s: Unspecified error: %u\n", func_name, err);
+    break;
+  }
+}
+
+
 int (timer_set_frequency)(uint8_t timer, uint32_t freq) {
 
   // Check if timer is within valid range
@@ -13,10 +44,16 @@ int (timer_set_frequency)(uint8_t timer, uint32_t freq) {
     return 1;
   }
 
+  // Check if frequency is higher than the minimum allowed
+  if(freq < (TIMER_FREQ/(BIT(16)-1))+1) {
+    fprintf(stderr, "Frequency must be above 18 Hz\n");
+    return 1;
+  }
+
   uint8_t ctrlWord = 0;
 
-  // escolher timer com bit 6 e 7
-  switch (timer) //BIT 6 and 7
+  // Select timer using bits 6 and 7
+  switch (timer)
 	{
 	case 0:
 	  ctrlWord &= ~(TIMER_SEL1 | TIMER_SEL2);
@@ -31,43 +68,64 @@ int (timer_set_frequency)(uint8_t timer, uint32_t freq) {
 	  break;
 	}
 
-  ctrlWord |= TIMER_LSB_MSB;
+  // Set initialization mode using bits 4 and 5
+  ctrlWord |= TIMER_LSB_MSB; 
 
-
-  // Read back e guardar bits 0, 1, 2, 3
+  // Get current timer config 
   uint8_t st;
   if(timer_get_conf(timer, &st) != 0) {
     fprintf(stderr, "Failed to get timer config\n");
     return 1;
   }
 
+  // Set least significant byte from current timer config
   ctrlWord |= (st & 0x0F);
 
-
-  // calcular initial counting value = X
-  // TIMER_FREQ / X = freq
-  // X = TIMER_FREQ / freq
+  /*
+  * Calculate initial counting value = init_count
+  * TIMER_FREQ / init_count = freq
+  * init_count = TIMER_FREQ / freq
+  */
   uint16_t init_count = TIMER_FREQ / freq;
 
-  // dividir initial counting value em lsb e msb (bit 4 e 5 respectivamente)
+  // Split initial counting value into lsb and msb (bits 4 and 5 respectively)
   uint8_t lsb;
   util_get_LSB(init_count, &lsb);
   uint8_t msb;
   util_get_MSB(init_count, &msb);
+  
 
   // Write control word command in control register
   if(sys_outb(TIMER_CTRL, ctrlWord) == EINVAL) {
-    //fprintf(stderr, "Failed to write (RB) %d in (control register) %d\n", RB_CMD, TIMER_CTRL);
+    fprintf(stderr, "Failed to write (WC) %d in (control register) %d\n", ctrlWord, TIMER_CTRL);
     return 1;
   }
 
-  if(sys_outb(TIMER_0 + timer, lsb) == EINVAL) {
-    //fprintf(stderr, "Failed to write (RB) %d in (control register) %d\n", RB_CMD, TIMER_CTRL);
+  int timer_port;
+  switch (timer)
+  {
+  case 0:
+    timer_port = TIMER_0;
+    break;
+  case 1:
+    timer_port = TIMER_1;
+    break;
+  case 2:
+    timer_port = TIMER_2;
+    break;
+  default:
+    timer_port = -1;
+    break;
+  }
+
+  // Write frequency's LSB followed by MSB into timer register
+  if(sys_outb(timer_port, lsb) == EINVAL) {
+    fprintf(stderr, "Failed to write (LSB) %d in (timer register) %d\n", lsb, timer_port);
     return 1;
   }
 
-  if(sys_outb(TIMER_0 + timer, msb) == EINVAL) {
-    //fprintf(stderr, "Failed to write (RB) %d in (control register) %d\n", RB_CMD, TIMER_CTRL);
+  if(sys_outb(timer_port, msb) == EINVAL) {
+    fprintf(stderr, "Failed to write (MSB) %d in (timer register) %d\n", msb, timer_port);
     return 1;
   }
 
@@ -75,22 +133,45 @@ int (timer_set_frequency)(uint8_t timer, uint32_t freq) {
 }
 
 int (timer_subscribe_int)(uint8_t *bit_no) {
-    /* To be implemented by the students */
-  printf("%s is not yet implemented!\n", __func__);
 
-  return 1;
+  if(!bit_no)
+    return 1;
+
+  // Send hook_id to caller
+  *bit_no = hook_id;
+
+  /* 
+  * Subscribe to notification from interrupt on TIMER_0
+  * Setting policy as IRQ_REENABLE automatically enables interrupts 
+  * therefore sys_irqenable doesn't have to be called explicitly
+  */
+  int err = sys_irqsetpolicy(TIMER0_IRQ, IRQ_REENABLE, &hook_id);
+
+  sys_irq_print_error(err, "sys_irqsetpolicy");
+
+  return err;
 }
 
 int (timer_unsubscribe_int)() {
-  /* To be implemented by the students */
-  printf("%s is not yet implemented!\n", __func__);
 
-  return 1;
+  // Disable interrupts on the IRQ line associated with the specified hook_id
+  int err = sys_irqdisable(&hook_id);
+
+  sys_irq_print_error(err, "sys_irqdisable");
+
+  if(err != OK)
+    return err;
+
+  // Unsubscribe interrupts on the IRQ line associated with the specified hook_id
+  err = sys_irqrmpolicy(&hook_id);
+
+  sys_irq_print_error(err, "sys_irqrmpolicy");
+
+  return err;
 }
 
 void (timer_int_handler)() {
-  /* To be implemented by the students */
-  printf("%s is not yet implemented!\n", __func__);
+  irq_counter++;
 }
 
 int (timer_get_conf)(uint8_t timer, uint8_t *st) {
@@ -138,18 +219,6 @@ int (timer_get_conf)(uint8_t timer, uint8_t *st) {
   return 0;
 }
 
-const char *bit_rep[16] = {
-    [ 0] = "0000", [ 1] = "0001", [ 2] = "0010", [ 3] = "0011",
-    [ 4] = "0100", [ 5] = "0101", [ 6] = "0110", [ 7] = "0111",
-    [ 8] = "1000", [ 9] = "1001", [10] = "1010", [11] = "1011",
-    [12] = "1100", [13] = "1101", [14] = "1110", [15] = "1111",
-};
-
-void print_byte(int d, __uint8_t byte)
-{
-    printf("%d: %s%s\n", d, bit_rep[byte >> 4], bit_rep[byte & 0x0F]);
-}
-
 int (timer_display_conf)(uint8_t timer, uint8_t st,
                         enum timer_status_field field) {
 
@@ -172,22 +241,19 @@ int (timer_display_conf)(uint8_t timer, uint8_t st,
   // Add initialization mode - BITs 4 and 5
   case tsf_initial:
     val = (st & TIMER_LSB_MSB) >> TIMER_LSB_BIT;
-    if(val < 1 || val > 3)
-      return 1;
-    conf.in_mode = (enum timer_init)val;
+    conf.in_mode = (val < 1 || val > 3) ? INVAL_val : (enum timer_init)val;
     break;
 
   // Add counting mode - BITs 1, 2 and 3
   case tsf_mode:
     val = (st & (BIT(3) | BIT(2) | BIT(1))) >> 1;
-    val -= (val > 5) ? 4 : 0;
+    val -= (val > 5) ? 4 : 0; // Set counting modes 6 and 7 to 2 and 3
     conf.count_mode = val;
     break;
 
   // Add counting base - BIT 0
   case tsf_base:
-    val = (st & TIMER_BCD);
-    conf.bcd = val;
+    conf.bcd = (st & TIMER_BCD);
     break;
 
   default:
